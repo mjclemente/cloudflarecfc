@@ -23,7 +23,7 @@ component output="false" displayname="Cloudflare.cfc"  {
   variables.arrayFields = [ "files" ];
   variables.dictionaryFields = {};
 
-  public any function init( required string authEmail, required string authKey, string baseUrl = "https://api.cloudflare.com/client/v4/", numeric httpTimeout = 60, boolean includeRaw = false, string zone_identifier = '' ) {
+  public any function init( string authEmail, string authKey, string baseUrl = "https://api.cloudflare.com/client/v4/", numeric httpTimeout = 60, boolean includeRaw = false, string zone_identifier = '' ) {
 
     structAppend( variables, arguments );
     return this;
