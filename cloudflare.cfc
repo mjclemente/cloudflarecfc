@@ -1,303 +1,433 @@
-/*
-  Copyright (c) 2017, Matthew Clemente, John Berquist
-
-  Licensed under the Apache License, Version 2.0 (the "License");
-  you may not use this file except in compliance with the License.
-  You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-  Unless required by applicable law or agreed to in writing, software
-  distributed under the License is distributed on an "AS IS" BASIS,
-  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  See the License for the specific language governing permissions and
-  limitations under the License.
+/**
+* cloudflarecfc
+* Copyright 2017  Matthew J. Clemente, John Berquist
+* Licensed under MIT (https://mit-license.org)
 */
-component output="false" displayname="Cloudflare.cfc"  {
+component displayname="cloudflarecfc"  {
 
-  variables.utcBaseDate = dateAdd( "l", createDate( 1970,1,1 ).getTime() * -1, createDate( 1970,1,1 ) );
-  variables.integerFields = [ ];
-  variables.numericFields = [ ];
-  variables.timestampFields = [ ];
-  variables.booleanFields = [ "purge_everything" ];
-  variables.arrayFields = [ "files" ];
-  variables.dictionaryFields = {};
+  variables._cloudflarecfc_version = '0.0.0';
 
-  public any function init( string authEmail, string authKey, string baseUrl = "https://api.cloudflare.com/client/v4/", numeric httpTimeout = 60, boolean includeRaw = false, string zone_identifier = '' ) {
+  public any function init(
+    string authKey = '',
+    string authEmail = '',
+    string baseUrl = "https://api.cloudflare.com/client/v4",
+    boolean includeRaw = false ) {
 
     structAppend( variables, arguments );
+
+    //map sensitive args to env variables or java system props
+    var secrets = {
+      'authKey': 'CLOUDFLARE_AUTH_KEY',
+      'authEmail': 'CLOUDFLARE_AUTH_EMAIL'
+    };
+    var system = createObject( 'java', 'java.lang.System' );
+
+    for ( var key in secrets ) {
+      //arguments are top priority
+      if ( variables[ key ].len() ) continue;
+
+      //check environment variables
+      var envValue = system.getenv( secrets[ key ] );
+      if ( !isNull( envValue ) && envValue.len() ) {
+        variables[ key ] = envValue;
+        continue;
+      }
+
+      //check java system properties
+      var propValue = system.getProperty( secrets[ key ] );
+      if ( !isNull( propValue ) && propValue.len() ) {
+        variables[ key ] = propValue;
+      }
+    }
+
+    //declare file fields to be handled via multipart/form-data **Important** this is not applicable if payload is application/json
+    variables.fileFields = [];
+
     return this;
   }
 
-  //ZONES
-  public struct function getZones() {
-    return apiCall( "zones", setupParams({}), "get" );
+  /**
+  * https://api.cloudflare.com/#zone-list-zones
+  * @hint List, search, sort, and filter your zones
+  */
+  public struct function listZones( struct filters = {} ) {
+    var params = filters;
+    if( filters.isEmpty() ) {
+      params = arguments.copy();
+      params.delete( 'filters' );
+    }
+    return apiCall( 'GET', '/zones', params );
   }
 
-  public struct function purgeFiles( any urls = [], string zone_identifier = variables.zone_identifier ) {
+  /**
+  * @hint Convenience function that delegates to listZones().
+  */
+  public struct function getZoneByName( required string name ) {
+    var filters = { name = name };
+    return listZones( filters );
+  }
 
-    var requestBody = { "purge_everything" : true };
+  /**
+  * https://api.cloudflare.com/#zone-purge-all-files
+  * @hint All resources in Cloudflare's cache for the zone should be removed.
+  */
+  public struct function purgeAllFiles( required string zoneId ) {
+    var zoneIdentifier = normalizeZoneIdentifier( zoneId );
+    var payload = { "purge_everything" : true };
+    return apiCall( 'POST', '/zones/#zoneIdentifier#/purge_cache', {}, payload );
+  }
 
-    if ( !isArray( urls ) ) {
-      if ( urls.len() )
-        requestBody = { "files" : [ urls ] };
-    } else if ( urls.len() ) {
-      requestBody = { "files" : urls };
+  /**
+  * https://api.cloudflare.com/#zone-purge-files-by-url
+  * @hint Granularly remove one or more files from Cloudflare's cache by specifying URLs.
+  */
+  public struct function purgeFilesByUrl( required string zoneId, required any files ) {
+    var zoneIdentifier = normalizeZoneIdentifier( zoneId );
+    var payload = { "files" : [] };
+
+    if ( !isArray( files ) )
+        payload.files.append( files );
+    else
+      payload.files.append( files, true );
+
+    return apiCall( 'POST', '/zones/#zoneIdentifier#/purge_cache', {}, payload );
+  }
+
+  /**
+  * https://api.cloudflare.com/#dns-records-for-a-zone-list-dns-records
+  * @hint List, search, sort, and filter a zones' DNS records.
+  */
+  public struct function listDnsRecords( required string zoneId, struct filters = {} ) {
+    var zoneIdentifier = normalizeZoneIdentifier( zoneId );
+    var params = filters;
+    if( filters.isEmpty() ) {
+      params = arguments.copy();
+      params.delete( 'filters' );
+      params.delete( 'zoneId' );
+    }
+    return apiCall( 'GET', '/zones/#zoneIdentifier#/dns_records', params );
+  }
+
+  /**
+  * @hint Convenience function that delegates to listDnsRecords().
+  */
+  public struct function getDnsRecordsByName( required string zoneId, required string name ) {
+    var filters = { name = name };
+    return listDnsRecords( zoneId = zoneId, filters = filters );
+  }
+
+  /**
+  * https://api.cloudflare.com/#dns-records-for-a-zone-create-dns-record
+  * @hint Create a new DNS record for a zone. See the record object definitions for required attributes for each record type
+  */
+  public struct function createDnsRecord( required string zoneId, struct record = {} ) {
+    var zoneIdentifier = normalizeZoneIdentifier( zoneId );
+
+    var payload = record;
+    if( record.isEmpty() ) {
+      payload = arguments.copy();
+      payload.delete( 'record' );
+      payload.delete( 'zoneId' );
     }
 
-    return apiCall( "zones/#zone_identifier#/purge_cache", setupParams( requestBody ), "delete" );
+    return apiCall( 'POST', '/zones/#zoneIdentifier#/dns_records', {}, payload );
   }
 
+  /**
+  * https://api.cloudflare.com/#dns-records-for-a-zone-update-dns-record
+  * @hint Create an existing DNS record for a zone. See the record object definitions for required attributes for each record type
+  */
+  public struct function updateDnsRecord( required string zoneId, required string recordId, struct record = {} ) {
+    var zoneIdentifier = normalizeZoneIdentifier( zoneId );
+    var recordIdentifier = normalizeDnsRecordIdentifier( zoneId, recordId );
 
+    var payload = record;
+    if( record.isEmpty() ) {
+      payload = arguments.copy();
+      payload.delete( 'record' );
+      payload.delete( 'recordId' );
+      payload.delete( 'zoneId' );
+    }
+
+    return apiCall( 'PUT', '/zones/#zoneIdentifier#/dns_records/#recordIdentifier#', {}, payload );
+  }
+
+  /**
+  * https://api.cloudflare.com/#dns-records-for-a-zone-delete-dns-record
+  * @hint Delete a DNS record
+  */
+  public struct function deleteDnsRecord( required string zoneId, required string recordId ) {
+    var zoneIdentifier = normalizeZoneIdentifier( zoneId );
+    var recordIdentifier = normalizeDnsRecordIdentifier( zoneId, recordId );
+    return apiCall( 'DELETE', '/zones/#zoneIdentifier#/dns_records/#recordIdentifier#' );
+  }
+
+  /**
+  * https://api.cloudflare.com/#getting-started-resource-ids
+  * @hint Checks the ID for validity, based on the docs: a 32-byte string of hex characters ([a-f0-9]).
+  */
+  private boolean function isValidIdentifier( required string id ) {
+    var regex = '^[a-f0-9]{32,32}$';
+    return refind( regex, id );
+  }
+
+  private string function normalizeZoneIdentifier( required string zoneId ) {
+    var identifier = zoneId;
+    if( !isValidIdentifier( identifier ) ) {
+      var zones = getZoneByName( identifier ).data.result;
+      if( zones.len() == 1 )
+        identifier = zones[1].id;
+    }
+    return identifier;
+  }
+
+  private string function normalizeDnsRecordIdentifier( required string zoneId, required string recordId ) {
+    var identifier = recordId;
+    if( !isValidIdentifier( identifier ) ) {
+      var records = getDnsRecordsByName( zoneId = zoneId, name = recordId ).data.result;
+      if( records.len() == 1 )
+        identifier = records[1].id;
+    }
+    return identifier;
+  }
 
   // PRIVATE FUNCTIONS
-  private struct function apiCall( required string path, array params = [ ], string method = "get" )  {
+  private struct function apiCall(
+    required string httpMethod,
+    required string path,
+    struct queryParams = { },
+    any payload = '',
+    struct headers = { } )  {
 
     var fullApiPath = variables.baseUrl & path;
+    var requestHeaders = getBaseHttpHeaders();
+    requestHeaders.append( headers, true );
+
     var requestStart = getTickCount();
+    var apiResponse = makeHttpRequest( httpMethod = httpMethod, path = fullApiPath, queryParams = queryParams, headers = requestHeaders, payload = payload );
 
-    var apiResponse = makeHttpRequest( urlPath = fullApiPath, params = params, method = method );
+    var result = {
+      'responseTime' = getTickCount() - requestStart,
+      'statusCode' = listFirst( apiResponse.statuscode, " " ),
+      'statusText' = listRest( apiResponse.statuscode, " " ),
+      'headers' = apiResponse.responseheader
+    };
 
-    var result = { "api_request_time" = getTickCount() - requestStart, "status_code" = listFirst( apiResponse.statuscode, " " ), "status_text" = listRest( apiResponse.statuscode, " " ) };
-    if ( variables.includeRaw ) {
-      result[ "raw" ] = { "method" = ucase( method ), "path" = fullApiPath, "params" = serializeJSON( params ), "response" = apiResponse.fileContent };
-    }
+    var parsedFileContent = {};
 
-    try {
-      structAppend(  result, deserializeJSON( apiResponse.fileContent ), true );
-    } catch ( any e ) {
-      writeDump( var='#fullApiPath#', format='html', abort='false' );
-      writeDump( var='#params#', format='html', abort='false' );
-      writeDump( var='#method#', format='html', abort='false' );
-      writeDump( var='#apiResponse#', format='html', abort='true' );
-      // writeOutput(apiResponse.filecontent);
-      // abort;
-    }
+    // Handle response based on mimetype
+    var mimeType = apiResponse.mimetype ?: requestHeaders[ 'Content-Type' ];
 
-    parseResult( result );
-    return result;
-  }
-
-  private any function makeHttpRequest( required string urlPath, required array params, required string method ) {
-
-    var result = {};
-    var requestBody = {};
-
-    for ( var param in params ) {
-      requestBody[ "#param.name.lcase()#" ] = param.value;
-    }
-
-    var javaUrl = CreateObject( "java", "java.net.URL" ).init( urlPath );
-    var req = javaUrl.openConnection();
-    req.setRequestMethod( method.ucase() );
-    req.setDoOutput( true );
-    req.setRequestProperty( "User-Agent", "cloudflare.cfc" );
-    req.setRequestProperty( "Content-Type", "application/json" );
-    req.setRequestProperty( "X-Auth-Email", variables.authEmail );
-    req.setRequestProperty( "X-Auth-Key", variables.authKey );
-
-    if ( params.len() ) {
-      var outputStream = req.getOutputStream();
-      outputStream.write( javaCast( "string" , serializeJson( requestBody ) ).getBytes( "UTF-8" ) );
-      outputStream.close();
-    }
-
-    var responseCode = req.getResponseCode();
-    var responseMessage = req.getResponseMessage();
-
-    if ( responseCode == req.HTTP_OK ) {
-      var inputStream = req.getInputStream();
+    if ( mimeType == 'application/json' && isJson( apiResponse.fileContent ) ) {
+      parsedFileContent = deserializeJSON( apiResponse.fileContent );
+    } else if ( mimeType.listLast( '/' ) == 'xml' && isXml( apiResponse.fileContent ) ) {
+      parsedFileContent = xmlToStruct( apiResponse.fileContent );
     } else {
-      var inputStream = req.getErrorStream();
+      parsedFileContent = apiResponse.fileContent;
     }
 
-    var bufferedReader = createObject("java", "java.io.BufferedReader" ).init( createObject( "java", "java.io.InputStreamReader" ).init( inputStream ) );
-    var stringBuilder = createObject( "java", "java.lang.StringBuilder" ).init();
+    //can be customized by API integration for how errors are returned
+    //if ( result.statusCode >= 400 ) {}
 
-    var line = bufferedReader.readLine();
-    while( !isNull( line ) ){
-      stringBuilder.append( line );
-      line = bufferedReader.readLine();
-    }
-    var headerFields = req.getHeaderFields().entrySet().toArray();
+    //stored in data, because some responses are arrays and others are structs
+    result[ 'data' ] = parsedFileContent;
 
-    var responseHeader = {};
-    for ( var entry in headerFields ) {
-
-      if ( !isNull( entry.getKey() ) ) {
-        responseHeader[ "#entry.getKey()#" ] = entry.getValue().len() == 1
-          ? entry.getValue()[1]
-          : entry.getValue();
-        } else {
-          responseHeader[ "Http_Version" ] = entry.getValue()[1].listFirst( ' ' );
-        }
-
+    if ( variables.includeRaw ) {
+      result[ 'raw' ] = {
+        'method' : ucase( httpMethod ),
+        'path' : fullApiPath,
+        'params' : parseQueryParams( queryParams ),
+        'payload' : parseBody( payload ),
+        'response' : apiResponse.fileContent
+      };
     }
 
-    req.disconnect();
-
-    result[ "fileContent" ] = stringBuilder.toString();
-    result[ "statusCode" ] = responseCode & ' ' & responseMessage;
-    result[ "responseHeader" ] = responseHeader;
     return result;
   }
 
-  private array function setupParams( required struct params ) {
-    var filteredParams = { };
-    var paramKeys = structKeyArray( params );
-    for ( var paramKey in paramKeys ) {
-      if ( structKeyExists( params, paramKey ) && !isNull( params[ paramKey ] ) ) {
-        filteredParams[ paramKey ] = params[ paramKey ];
-      }
-    }
-
-    return parseDictionary( filteredParams );
-  }
-
-  private array function parseDictionary( required struct dictionary, string name = '', string root = '' ) {
-    var result = [ ];
-    var structFieldExists = structKeyExists( variables.dictionaryFields, name );
-
-    // validate required dictionary keys based on variables.dictionaries
-    if ( structFieldExists ) {
-      for ( var field in variables.dictionaryFields[ name ].required ) {
-        if ( !structKeyExists( dictionary, field ) ) {
-          throwError( "'#name#' dictionary missing required field: #field#" );
-        }
-      }
-    }
-
-    // special tag handling -- tags have a 3 key limit
-    if ( name == "tag" ) {
-      if ( arrayLen( structKeyArray( dictionary ) ) > 3 ) {
-        throwError( "There can be a maximum of 3 keys in a tag struct." );
-      }
-    }
-
-    for ( var key in dictionary ) {
-
-      // confirm that key is a valid one based on variables.dictionaries
-      if ( structFieldExists && !( arrayFindNoCase( variables.dictionaryFields[ name ].required, key ) || arrayFindNoCase( variables.dictionaryFields[ name ].optional, key ) ) ) {
-        throwError( "'#name#' dictionary has invalid field: #key#" );
-      }
-
-      var fullKey = len( root ) ? root & ':' & lcase( key ) : lcase( key );
-      if ( isStruct( dictionary[ key ] ) ) {
-        for ( var item in parseDictionary( dictionary[ key ], key, fullKey ) ) {
-          arrayAppend( result, item );
-        }
-      } else if ( isArray( dictionary[ key ] ) ) {
-        arrayAppend( result, parseArray( dictionary[ key ], key, fullKey ) );
-      } else {
-        // note: metadata struct is special - no validation is done on it
-        arrayAppend( result, { name = fullKey, value = getValidatedParam( key, dictionary[ key ], true ) } );
-      }
-
-    }
-    return result;
-  }
-
-  private struct function parseArray( required array list, string name = '', string root = '' ) {
-    var result = [ ];
-    var index = 0;
-
-    var arrayFieldExists = arrayFindNoCase( variables.arrayFields, name );
-
-    if ( !arrayFieldExists ) {
-      throwError( "'#name#' is not an allowed list variable." );
-    }
-
-    for ( var item in list ) {
-      if ( isStruct( item ) ) {
-        var fullKey = len( root ) ? root & "[" & index & "]" : name & "[" & index & "]";
-        for ( var item in parseDictionary( item, '', fullKey ) ) {
-          arrayAppend( result, item );
-        }
-        ++index;
-      } else {
-        var fullKey = len( root ) ? root : name;
-        arrayAppend( result, getValidatedParam( name, item ) );
-      }
-    }
-
+  private struct function getBaseHttpHeaders() {
     return {
-      "name" : name,
-      "value" : result
+      'Accept' : 'application/json',
+      'Content-Type' : 'application/json',
+      'X-Auth-Key' : '#variables.authKey#',
+      'X-Auth-Email' : '#variables.authEmail#',
+      'User-Agent' : 'cloudflarecfc/#variables._cloudflarecfc_version# (ColdFusion)'
     };
   }
 
-  private any function getValidatedParam( required string paramName, required any paramValue, boolean validate = true ) {
-    // only simple values
-    if ( !isSimpleValue( paramValue ) ) throwError( "'#paramName#' is not a simple value." );
+  private any function makeHttpRequest(
+    required string httpMethod,
+    required string path,
+    struct queryParams = { },
+    struct headers = { },
+    any payload = ''
+  ) {
+    var result = '';
 
-    // integer
-    if ( arrayFindNoCase( variables.integerFields, paramName ) ) {
-      if ( !isInteger( paramValue ) ) {
-        throwError( "field '#paramName#' requires an integer value" );
-      }
-      return paramValue;
-    }
-    // numeric
-    if ( arrayFindNoCase( variables.numericFields, paramName ) ) {
-      if ( !isNumeric( paramValue ) ) {
-        throwError( "field '#paramName#' requires a numeric value" );
-      }
-      return paramValue;
-    }
+    var fullPath = path & ( !queryParams.isEmpty()
+      ? ( '?' & parseQueryParams( queryParams, false ) )
+      : '' );
 
-    // boolean
-    if ( arrayFindNoCase( variables.booleanFields, paramName ) ) {
-      return ( paramValue ? "true" : "false" );
-    }
+    var requestHeaders = parseHeaders( headers );
 
-    // timestamp
-    if ( arrayFindNoCase( variables.timestampFields, paramName ) ) {
-      return parseUTCTimestampField( paramValue, paramName );
-    }
+    cfhttp( url = fullPath, method = httpMethod,  result = 'result' ) {
 
-    // default is string
-    return paramValue;
-  }
+      if ( isJsonPayload( headers ) ) {
 
-  private void function parseResult( required struct result ) {
-    var resultKeys = structKeyArray( result );
-    for ( var key in resultKeys ) {
-      if ( structKeyExists( result, key ) && !isNull( result[ key ] ) ) {
-        if ( isStruct( result[ key ] ) ) parseResult( result[ key ] );
-        if ( isArray( result[ key ] ) ) {
-          for ( var item in result[ key ] ) {
-            if ( isStruct( item ) ) parseResult( item );
-          }
+        var requestPayload = parseBody( payload );
+        if ( isJSON( requestPayload ) )
+          cfhttpparam( type = "body", value = requestPayload );
+
+      } else if ( isFormPayload( headers ) ) {
+
+        headers.delete( 'Content-Type' ); //Content Type added automatically by cfhttppparam
+
+        for ( var param in payload ) {
+          if ( !variables.fileFields.contains( param ) )
+            cfhttpparam( type = 'formfield', name = param, value = payload[ param ] );
+          else
+            cfhttpparam( type = 'file', name = param, file = payload[ param ] );
         }
-        if ( arrayFindNoCase( variables.timestampFields, key ) ) result[ key ] = parseUTCTimestamp( result[ key ] );
+
+      }
+
+      //handled last, to account for possible Content-Type header correction for forms
+      var requestHeaders = parseHeaders( headers );
+      for ( var header in requestHeaders ) {
+        cfhttpparam( type = "header", name = header.name, value = header.value );
+      }
+
+    }
+    return result;
+  }
+
+  /**
+  * @hint convert the headers from a struct to an array
+  */
+  private array function parseHeaders( required struct headers ) {
+    var sortedKeyArray = headers.keyArray();
+    sortedKeyArray.sort( 'textnocase' );
+    var processedHeaders = sortedKeyArray.map(
+      function( key ) {
+        return { name: key, value: trim( headers[ key ] ) };
+      }
+    );
+    return processedHeaders;
+  }
+
+  /**
+  * @hint converts the queryparam struct to a string, with optional encoding and the possibility for empty values being pass through as well
+  */
+  private string function parseQueryParams( required struct queryParams, boolean encodeQueryParams = true, boolean includeEmptyValues = true ) {
+    var sortedKeyArray = queryParams.keyArray();
+    sortedKeyArray.sort( 'text' );
+
+    var queryString = sortedKeyArray.reduce(
+      function( queryString, queryParamKey ) {
+        var encodedKey = encodeQueryParams
+          ? encodeUrl( queryParamKey.lcase() )
+          : queryParamKey.lcase();
+        if ( !isArray( queryParams[ queryParamKey ] ) ) {
+          var encodedValue = encodeQueryParams && len( queryParams[ queryParamKey ] )
+            ? encodeUrl( queryParams[ queryParamKey ] )
+            : queryParams[ queryParamKey ];
+        } else {
+          var encodedValue = encodeQueryParams && ArrayLen( queryParams[ queryParamKey ] )
+            ?  encodeUrl( serializeJSON( queryParams[ queryParamKey ] ) )
+            : queryParams[ queryParamKey ].toList();
+          }
+        return queryString.listAppend( encodedKey & ( includeEmptyValues || len( encodedValue ) ? ( '=' & encodedValue ) : '' ), '&' );
+      }, ''
+    );
+
+    return queryString.len() ? queryString : '';
+  }
+
+  private string function parseBody( required any body ) {
+    if ( isStruct( body ) || isArray( body ) )
+      return serializeJson( body );
+    else if ( isJson( body ) )
+      return body;
+    else
+      return '';
+  }
+
+  private string function encodeUrl( required string str, boolean encodeSlash = true ) {
+    var result = replacelist( urlEncodedFormat( str, 'utf-8' ), '%2D,%2E,%5F,%7E', '-,.,_,~' );
+    if ( !encodeSlash ) result = replace( result, '%2F', '/', 'all' );
+
+    return result;
+  }
+
+  /**
+  * @hint helper to determine if body should be sent as JSON
+  */
+  private boolean function isJsonPayload( required struct headers ) {
+    return headers[ 'Content-Type' ] == 'application/json';
+  }
+
+  /**
+  * @hint helper to determine if body should be sent as form params
+  */
+  private boolean function isFormPayload( required struct headers ) {
+    return arrayContains( [ 'application/x-www-form-urlencoded', 'multipart/form-data' ], headers[ 'Content-Type' ] );
+  }
+
+  /**
+  *
+  * Based on an (old) blog post and UDF from Raymond Camden
+  * https://www.raymondcamden.com/2012/01/04/Converting-XML-to-JSON-My-exploration-into-madness/
+  *
+  */
+  private struct function xmlToStruct( required any x ) {
+
+    if ( isSimpleValue( x ) && isXml( x ) )
+      x = xmlParse( x );
+
+    var s = {};
+
+    if ( xmlGetNodeType( x ) == "DOCUMENT_NODE" ) {
+      s[ structKeyList( x ) ] = xmlToStruct( x[ structKeyList( x ) ] );
+    }
+
+    if ( structKeyExists( x, "xmlAttributes" ) && !structIsEmpty( x.xmlAttributes ) ) {
+      s.attributes = {};
+      for ( var item in x.xmlAttributes ) {
+        s.attributes[ item ] = x.xmlAttributes[ item ];
       }
     }
-  }
 
-  private any function parseUTCTimestampField( required any utcField, required string utcFieldName ) {
-    if ( isInteger( utcField ) ) return utcField;
-    if ( isDate( utcField ) ) return getUTCTimestamp( utcField );
-    throwError( "utc timestamp field '#utcFieldName#' is in an invalid format" );
-  }
+    if ( structKeyExists( x, 'xmlText' ) && x.xmlText.trim().len() )
+      s.value = x.xmlText;
 
-  private numeric function getUTCTimestamp( required date dateToConvert ) {
-    return dateDiff( "s", variables.utcBaseDate, dateToConvert );
-  }
+    if ( structKeyExists( x, "xmlChildren" ) ) {
 
-  private date function parseUTCTimestamp( required numeric utcTimestamp ) {
-    return dateAdd( "s", utcTimestamp, variables.utcBaseDate );
-  }
+      for ( var xmlChild in x.xmlChildren ) {
+        if ( structKeyExists( s, xmlChild.xmlname ) ) {
 
-  private boolean function isInteger( required any varToValidate ) {
-    return ( isNumeric( varToValidate ) && isValid( "integer", varToValidate ) );
-  }
+          if ( !isArray( s[ xmlChild.xmlname ] ) ) {
+            var temp = s[ xmlChild.xmlname ];
+            s[ xmlChild.xmlname ] = [ temp ];
+          }
 
-  private string function encodeurl( required string str ) {
-    return replacelist( urlEncodedFormat( str, "utf-8" ), "%2D,%2E,%5F,%7E", "-,.,_,~" );
-  }
+          arrayAppend( s[ xmlChild.xmlname ], xmlToStruct( xmlChild ) );
 
-  private void function throwError( required string errorMessage, string detail = "" ) {
-    throw( type = "Cloudflare", message = "(cloudflare.cfc) " & errorMessage, detail = detail );
+        } else {
+
+          if ( structKeyExists( xmlChild, "xmlChildren" ) && arrayLen( xmlChild.xmlChildren ) ) {
+              s[ xmlChild.xmlName ] = xmlToStruct( xmlChild );
+           } else if ( structKeyExists( xmlChild, "xmlAttributes" ) && !structIsEmpty( xmlChild.xmlAttributes ) ) {
+            s[ xmlChild.xmlName ] = xmlToStruct( xmlChild );
+          } else {
+            s[ xmlChild.xmlName ] = xmlChild.xmlText;
+          }
+
+        }
+
+      }
+    }
+
+    return s;
   }
 
 }
