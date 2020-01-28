@@ -1,6 +1,6 @@
 /**
 * cloudflarecfc
-* Copyright 2017  Matthew J. Clemente, John Berquist
+* Copyright 2017-2020  Matthew J. Clemente, John Berquist
 * Licensed under MIT (https://mit-license.org)
 */
 component displayname="cloudflarecfc"  {
