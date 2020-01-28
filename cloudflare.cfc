@@ -5,7 +5,7 @@
 */
 component displayname="cloudflarecfc"  {
 
-  variables._cloudflarecfc_version = '0.0.0';
+  variables._cloudflarecfc_version = '0.1.0';
 
   public any function init(
     string authKey = '',
