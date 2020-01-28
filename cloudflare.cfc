@@ -11,7 +11,8 @@ component displayname="cloudflarecfc"  {
     string authKey = '',
     string authEmail = '',
     string baseUrl = "https://api.cloudflare.com/client/v4",
-    boolean includeRaw = false ) {
+    boolean includeRaw = false,
+    numeric httpTimeout = 50 ) {
 
     structAppend( variables, arguments );
 
@@ -270,7 +271,7 @@ component displayname="cloudflarecfc"  {
 
     var requestHeaders = parseHeaders( headers );
 
-    cfhttp( url = fullPath, method = httpMethod,  result = 'result' ) {
+    cfhttp( url = fullPath, method = httpMethod,  result = 'result', timeout = variables.httpTimeout ) {
 
       if ( isJsonPayload( headers ) ) {
 
